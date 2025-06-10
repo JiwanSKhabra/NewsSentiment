@@ -1,31 +1,34 @@
+import os
+import re
 import requests
 import pandas as pd
+from urllib.parse import quote_plus
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sqlalchemy import create_engine
-import re
-import os
-from urllib.parse import quote_plus
 
+from dotenv import load_dotenv
+load_dotenv()
 
-api_key = os.environ['API_KEY']
+# === API Keys and MySQL Credentials ===
+API_KEY = os.environ['API_KEY']  # NYT
+GNEWS_API_KEY = os.environ['GNEWS_API_KEY']
 MYSQL_PASSWORD = os.environ['MYSQL_PASSWORD']
 encoded_password = quote_plus(MYSQL_PASSWORD)
 
-# === MYSQL DB CONFIG ===
+# === MySQL Config ===
 MYSQL_USER = "root"
 MYSQL_HOST = "localhost"
 MYSQL_PORT = 3306
 MYSQL_DB = "news_data"
-TABLE_NAME = "nyt_articles"
+NYT_TABLE = "nyt_articles"
+GNEWS_TABLE = "gnews_articles"
 
-# === NYT API CONFIG ===
-API_KEY = api_key
-query = "climate change"
+# === Query & Time Range ===
+query = "climate OR politics OR economy OR technology OR environment"
 begin_date = "20240601"
 end_date = "20240630"
-url = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
 
-# === TEXT CLEANING FUNCTION ===
+# === Utility ===
 def clean_text(text):
     if not text:
         return ""
@@ -34,11 +37,12 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-# === INIT ===
 analyzer = SentimentIntensityAnalyzer()
-all_rows = []
+nyt_rows = []
+gnews_rows = []
 
-# === SCRAPE ARTICLES ===
+# === NYT Scraping ===
+nyt_url = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
 for page in range(5):
     params = {
         "q": query,
@@ -46,64 +50,87 @@ for page in range(5):
         "sort": "newest",
         "begin_date": begin_date,
         "end_date": end_date,
-        "page": page
+        "page": page,
+        "fq": 'source:("The New York Times")'
     }
-
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(nyt_url, params=params)
         response.raise_for_status()
-        data = response.json()
-
-        docs = data.get("response", {}).get("docs", [])
+        docs = response.json().get("response", {}).get("docs", [])
         if not docs:
-            print(f"⚠️ No more articles found at page {page}.")
+            print(f"⚠️ No more NYT articles on page {page}.")
             break
-
         for doc in docs:
             snippet = doc.get("snippet", "")
-            cleaned_snippet = clean_text(snippet)
-            vs = analyzer.polarity_scores(cleaned_snippet)
-            compound_score = vs["compound"]
-            sentiment = (
-                "Positive" if compound_score > 0.05 else
-                "Negative" if compound_score < -0.05 else
-                "Neutral"
-            )
-
-            all_rows.append({
+            cleaned = clean_text(snippet)
+            score = analyzer.polarity_scores(cleaned)["compound"]
+            sentiment = "Positive" if score > 0.05 else "Negative" if score < -0.05 else "Neutral"
+            nyt_rows.append({
                 "Title": doc["headline"]["main"],
                 "Published_Date": doc["pub_date"][:10],
                 "URL": doc["web_url"],
                 "Snippet": snippet,
-                "Cleaned_Snippet": cleaned_snippet,
-                "Source": doc.get("source", ""),
+                "Cleaned_Snippet": cleaned,
+                "Source": doc.get("source", "NYT"),
                 "News_Desk": doc.get("news_desk", ""),
                 "Sentiment": sentiment,
-                "Sentiment_Score": compound_score,
+                "Sentiment_Score": score,
                 "Bias": "Center-Left"
             })
-
-        print(f"✅ Page {page} processed with {len(docs)} articles.")
-
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Request error on page {page}: {e}")
-        break
+        print(f"✅ NYT Page {page} scraped.")
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        print(f"❌ NYT error on page {page}: {e}")
         break
 
-# === SAVE TO MYSQL ===
-if all_rows:
-    df = pd.DataFrame(all_rows)
-    print(f"📄 Total articles collected: {len(df)}")
+# === GNews Scraping ===
+gnews_url = "https://gnews.io/api/v4/search"
+try:
+    gnews_params = {
+        "q": query,
+        "lang": "en",
+        "max": 50,
+        "apikey": GNEWS_API_KEY
+    }
+    gnews_response = requests.get(gnews_url, params=gnews_params)
+    gnews_response.raise_for_status()
+    gnews_articles = gnews_response.json().get("articles", [])
 
-    try:
-        connection_url = f"mysql+mysqlconnector://{MYSQL_USER}:{encoded_password}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
-        engine = create_engine(connection_url)
+    for article in gnews_articles:
+        desc = article.get("description", "")
+        cleaned = clean_text(desc)
+        score = analyzer.polarity_scores(cleaned)["compound"]
+        sentiment = "Positive" if score > 0.05 else "Negative" if score < -0.05 else "Neutral"
+        gnews_rows.append({
+            "Title": article.get("title", ""),
+            "Published_Date": article.get("publishedAt", "")[:10],
+            "URL": article.get("url", ""),
+            "Snippet": desc,
+            "Cleaned_Snippet": cleaned,
+            "Source": article.get("source", {}).get("name", "GNews"),
+            "News_Desk": "GNews",
+            "Sentiment": sentiment,
+            "Sentiment_Score": score,
+            "Bias": "Mixed"
+        })
+    print(f"✅ GNews scraped: {len(gnews_rows)} articles.")
+except Exception as e:
+    print(f"❌ GNews error: {e}")
 
-        df.to_sql(TABLE_NAME, con=engine, if_exists="replace", index=False)
-        print(f"✅ Articles saved to MySQL table `{TABLE_NAME}` in DB `{MYSQL_DB}`.")
-    except Exception as e:
-        print(f"❌ Failed to save to MySQL: {e}")
-else:
-    print("⚠️ No articles to save.")
+# === Save to MySQL ===
+try:
+    engine = create_engine(
+        f"mysql+mysqlconnector://{MYSQL_USER}:{encoded_password}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
+    )
+
+    if nyt_rows:
+        pd.DataFrame(nyt_rows).to_sql(NYT_TABLE, con=engine, if_exists="replace", index=False)
+        print(f"✅ NYT data saved to `{NYT_TABLE}`")
+
+    if gnews_rows:
+        pd.DataFrame(gnews_rows).to_sql(GNEWS_TABLE, con=engine, if_exists="replace", index=False)
+        print(f"✅ GNews data saved to `{GNEWS_TABLE}`")
+
+    if not nyt_rows and not gnews_rows:
+        print("⚠️ No articles collected from either source.")
+except Exception as e:
+    print(f"❌ MySQL save error: {e}")
