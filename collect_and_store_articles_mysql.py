@@ -4,16 +4,18 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sqlalchemy import create_engine
 import re
 import os
+from urllib.parse import quote_plus
+
 
 api_key = os.environ['API_KEY']
 MYSQL_PASSWORD = os.environ['MYSQL_PASSWORD']
+encoded_password = quote_plus(MYSQL_PASSWORD)
 
 # === MYSQL DB CONFIG ===
 MYSQL_USER = "root"
 MYSQL_HOST = "localhost"
 MYSQL_PORT = 3306
 MYSQL_DB = "news_data"
-
 TABLE_NAME = "nyt_articles"
 
 # === NYT API CONFIG ===
@@ -96,7 +98,7 @@ if all_rows:
     print(f"📄 Total articles collected: {len(df)}")
 
     try:
-        connection_url = f"mysql+mysqlconnector://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
+        connection_url = f"mysql+mysqlconnector://{MYSQL_USER}:{encoded_password}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}"
         engine = create_engine(connection_url)
 
         df.to_sql(TABLE_NAME, con=engine, if_exists="replace", index=False)
